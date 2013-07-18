@@ -2,4 +2,5 @@ name = Project Source: GitLab
 description = Creates Drupal project XML based on Gitlab projects.
 core = 7.x
 package = Development
+configure = admin/config/development/gitlab-src
 dependencies[] = project_src
