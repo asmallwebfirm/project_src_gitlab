@@ -182,6 +182,7 @@ function project_src_gitlab_project_src_releases($short_name, $api_version, $inf
       $dev_releases[$original] = _project_src_gitlab_format_release_info($branch, $info);
       $dev_releases[$original]['download_link'] = str_replace($branch['name'], $original, $dev_releases[$original]['download_link']);
     }
+    // Cache these using CACHE_TEMPORARY to ensure dev releases stay up-to-date.
     cache_set($dev_cid, $dev_releases, 'cache', CACHE_TEMPORARY);
   }
   else {
@@ -221,6 +222,15 @@ function project_src_gitlab_project_src_releases($short_name, $api_version, $inf
   }
 
   return $releases + $dev_releases;
+}
+
+
+/**
+ * Clears Project Source: GitLab's cached projects, releases and XML.
+ */
+function project_src_gitlab_clear_cache() {
+  cache_clear_all('project_src_gitlab', 'cache', TRUE);
+  cache_clear_all('%/drupal/release-history/', 'cache_page', TRUE);
 }
 
 

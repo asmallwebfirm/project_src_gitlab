@@ -29,5 +29,21 @@ function project_src_gitlab_settings($form_state) {
     '#default_value' => variable_get('project_src_gitlab_token', ''),
   );
 
+  $form['actions']['cache_clear'] = array(
+    '#type' => 'submit',
+    '#value' => t('Clear project cache'),
+    '#weight' => 10,
+    '#submit' => array('project_src_gitlab_clear_cache_submit'),
+  );
+
   return system_settings_form($form);
+}
+
+
+/**
+ * Submit handler to clear Project Source: GitLab's cached projects/releases.
+ */
+function project_src_gitlab_clear_cache_submit($form, &$form_state) {
+  drupal_set_message(t('GitLab project cache data cleared successfully.'));
+  project_src_gitlab_clear_cache();
 }
