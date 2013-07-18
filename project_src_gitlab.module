@@ -1,0 +1,330 @@
+<?php
+
+/**
+ * @file
+ * Hooks and functions for the Project Source: GitLab module.
+ */
+
+
+/**
+ * Defines the API version with which we integrate.
+ */
+define('PROJECT_SRC_GITLAB_API_VERSION', 'api/v3');
+
+
+/**
+ * Implements hook_menu().
+ */
+function project_src_gitlab_menu() {
+  // Admin callback.
+  $items['admin/config/development/gitlab-src'] = array(
+    'title' => 'Project Source: GitLab',
+    'description' => 'Configure GitLab API options for the Project Source module.', 
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('project_src_gitlab_settings'),
+    'access arguments' => array('administer project gitlab src'),
+    'file' => 'project_src_gitlab.admin.inc',
+  );
+
+  // Callback to download archive packages without revealing the private token.
+  $items['drupal/release-files/%/%/%/download.tar.gz'] = array(
+    'title' => 'File download callback for a specific project release',
+    'delivery callback' => 'project_src_deliver_clean_page',
+    'page callback' => 'project_src_gitlab_get_archive',
+    'page arguments' => array(2, 3, 4),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+
+/**
+ * Implements hook_permission().
+ */
+function project_src_gitlab_permission() {
+  return array(
+    'administer project gitlab src' => array(
+      'title' => t('Administer Project Source: GitLab'),
+      'description' => t('Perform administration tasks for Project Source: GitLab'),
+      'restrict access' => TRUE,
+    ),
+  );
+}
+
+
+/**
+ * Menu callback that returns the archive from GitLab in a way that doesn't
+ * expose the private token.
+ *
+ * @param $namespace
+ *   The namespace (or group) under which the project exists.
+ *
+ * @param $project_name
+ *   The name of the project.
+ *
+ * @param $version
+ *   The version of the project.
+ *
+ * @return
+ *   The archive as a string, suitable for streaming.
+ */
+function project_src_gitlab_get_archive($namespace, $project_name, $version) {
+  $gitlab = variable_get('project_src_gitlab_url', 'https://gitlab.com');
+  $get = $gitlab . '/' . $namespace . '/' . $project_name . '/repository/archive';
+
+  if ($file = _project_src_gitlab_file_as_string($get, $version)) {
+    drupal_add_http_header('Content-type', 'application/octet-stream');
+    drupal_add_http_header('Content-transfer-encoding', 'binary');
+    drupal_add_http_header('Content-disposition', 'attachment; filename="' . $project_name . '-' . $version . '.tar.gz"');
+  }
+  else {
+    $file = '';
+  }
+
+  return $file;
+}
+
+
+/**
+ * Implements hook_project_src_info().
+ */
+function project_src_gitlab_project_src_info() {
+  // This can be an expensive operation, so we cache our results.
+  $cid = 'project_src_gitlab_projects';
+  if (!$projects = cache_get($cid)) {
+    $projects = array();
+    $gitlab = variable_get('project_src_gitlab_url', 'https://gitlab.com');
+    $url = $gitlab . '/' . PROJECT_SRC_GITLAB_API_VERSION . '/projects';
+
+    // Build out project definitions as expected by this hook's invoker.
+    if ($response = _project_src_gitlab_api_call($url)) {
+      // If GitLab return a response message, there was a problem.
+      if (isset($response['message'])) {
+        watchdog('project src gitlab', 'Unable to retrieve GitLab projects. Message returned was: @message', array(
+          '@message' => $response['message'],
+        ));
+        return array();
+      }
+
+      foreach ($response as $project_info) {
+        // Initialize this project.
+        $project = array();
+        $project['short_name'] = str_replace('-', '_', $project_info['path']);
+        $project['short_name'] = check_plain($project['short_name']);
+
+        // Project-wide variables.
+        $project['title'] = check_plain($project_info['name']);
+        $project['creator'] = check_plain($project_info['owner']['username']);
+        $project['project_status'] = 'published';
+        $project['link'] = $gitlab . '/' . $project_info['path_with_namespace'];
+        $project['link'] = check_url($project['link']);
+        if (preg_match_all("/^(\\d+).x-(\\d+).x$/is", $project_info['default_branch'], $version)) {
+          $project['default_major'] = check_plain($version[2][0]);
+        }
+
+        // Variables required for GitLab API handling.
+        $project['api'] = array(
+          'id' => $project_info['id'],
+          'path_with_namespace' => $project_info['path_with_namespace'],
+          'branches' => array(),
+        );
+
+        // Get all branches on this project.
+        if ($branches = _project_src_gitlab_api_call($url . '/' . $project_info['id'] . '/repository/branches')) {
+          foreach ($branches as $branch) {
+            if (preg_match_all("/^(\\d+).x-(\\d+).x$/is", $branch['name'], $versions)) {
+              $api_version = check_plain($versions[1][0] . '.x');
+              $project['api_version'] = $api_version;
+              $project['api']['branches'][$api_version][$branch['name']] = $branch;
+              // @todo This isn't actually working...
+              $project['supported_majors'] = implode(',', $versions[2]);
+              $project['recommended_major'] = max($version[2]);
+
+              // Save off this project to the proper place in return array.
+              $projects[$api_version][$project['short_name']] = $project;
+            }
+          }
+        }
+      }
+    }
+
+    // If projects were returned, cache them. Depending on the backend used to
+    // generate the project, this process could be expensive.
+    if (!empty($projects)) {
+      cache_set($cid, $projects, 'cache');
+    }
+  }
+  else {
+    $projects = $projects->data;
+  }
+
+  return $projects;
+}
+
+
+/**
+ * Implements hook_project_src_releases().
+ */
+function project_src_gitlab_project_src_releases($short_name, $api_version, $info) {
+  // Load all of our declared projects for this API version.
+  $projects = project_src_get_projects($api_version, 'project_src_gitlab');
+
+  // Loop through all relevant branches from GitLab and create dev releases,
+  // regardless of whether or not there are any tags for a release.
+  $dev_cid = 'project_src_gitlab_releases_' . $short_name . '_' . $api_version . '_dev';
+  if (!$dev_releases = cache_get($dev_cid)) {
+    $dev_releases = array();
+    foreach ($info['api']['branches'][$api_version] as $branch) {
+      $original = $branch['name'];
+      $branch['name'] = $original . '-dev';
+      $dev_releases[$original] = _project_src_gitlab_format_release_info($branch, $info);
+      $dev_releases[$original]['download_link'] = str_replace($branch['name'], $original, $dev_releases[$original]['download_link']);
+    }
+    cache_set($dev_cid, $dev_releases, 'cache', CACHE_TEMPORARY);
+  }
+  else {
+    $dev_releases = $dev_releases->data;
+  }
+
+  // React if the incoming project is one of ours.
+  $project = array();
+  if (isset($projects[$short_name])) {
+    // Get this project.
+    $cid = 'project_src_gitlab_releases_' . $short_name . '_' . $api_version;
+    if (!$tags = cache_get($cid)) {
+      // Attempt to load all tags for the given release and API version.
+      $gitlab = variable_get('project_src_gitlab_url', 'https://gitlab.com');
+      $url = $gitlab . '/' . PROJECT_SRC_GITLAB_API_VERSION . '/projects/' . $info['api']['id'] . '/repository/tags';
+      $releases = array();
+      if ($tags = _project_src_gitlab_api_call($url)) {
+        // Loop through all release tags from GitLab and create releases.
+        foreach ($tags as $tag) {
+          // Match on tags of the proper form.
+          if (preg_match_all("/^(\\d+).x-(\\d+).\\d+/is", $tag['name'], $version)) {
+            $api = $version[1][0] . '.x';
+            // Only return releases for the current API version.
+            if ($api == $api_version) {
+              // Add the release to the master releases array.
+              $releases[$tag['name']] = _project_src_gitlab_format_release_info($tag, $info);
+            }
+          }
+        }
+      }
+
+      cache_set($cid, $releases, 'cache');
+    }
+    else {
+      $releases = $tags->data;
+    }
+  }
+
+  return $releases + $dev_releases;
+}
+
+
+/**
+ * Formats a release info array given a GitLab API git commit ref array
+ * structure, the project info array, and a file URL.
+ *
+ * @param array $branch
+ *   A GitLab API git commit ref array structure (e.g. commit/branch)
+ *
+ * @param array $info
+ *   A project info array as provided by hook_project_src_info()
+ *
+ * @return array
+ *   A release array suitable for use in the primary release theme function.
+ */
+function _project_src_gitlab_format_release_info($commitref, $info) {
+  // Root of the project on GitLab.
+  $gitlab = variable_get('project_src_gitlab_url', 'https://gitlab.com');
+  $root = $gitlab . '/' . $info['api']['path_with_namespace'];
+
+  // Filter $commitref['name'] here, since it's used very often below.
+  $commitref['name'] = check_plain($commitref['name']);
+
+  // Save relevant values to a release array.
+  $release['name'] = $info['short_name'] . ' ' . $commitref['name'];
+  $release['version'] = $release['tag'] = $commitref['name'];
+  $release['date'] = strtotime($commitref['commit']['committed_date']);
+  if (preg_match_all("/^\\d+\\.x-(\\d+)\\.([x\\d+])-?(.*)?/is", $commitref['name'], $version)) {
+    $release['version_major'] = (int) $version[1][0];
+    $release['version_patch'] = is_numeric($version[2][0]) ? (int) $version[2][0] : NULL;
+    $release['version_extra'] = isset($version[3][0]) ? $version[3][0] : NULL;
+  }
+  $release['status'] = 'published';
+  $release['release_link'] = check_url($root);
+
+  // Details related to the download file.
+  $download_root = 'drupal/release-files/';
+  if ($file_contents = _project_src_gitlab_file_as_string($root . '/repository/archive', $commitref['name'])) {
+    $release['download_link'] = url($download_root . $info['api']['path_with_namespace'] . '/' . $commitref['name'] . '/download.tar.gz', array(
+      'absolute' => TRUE,
+    ));
+    $release['mdhash'] = md5($file_contents);
+    $release['filesize'] = strlen($file_contents);
+    $release['archive_type'] = 'tar.gz';
+  }
+
+  return $release;
+}
+
+
+/**
+ * Returns the response of an API request to GitLab.
+ *
+ * @param string $url
+ *   The URL of the desired GitLab API resource.
+ *
+ * @return array
+ *   The contents of the unencoded GitLab response or an empty array on failure.
+ */
+function _project_src_gitlab_api_call($url) {
+  $ch = curl_init($url);
+  curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
+  curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+  curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, FALSE);
+  curl_setopt($ch, CURLOPT_HTTPHEADER, array('PRIVATE-TOKEN: ' . variable_get('project_src_gitlab_token', '')));
+  $response = curl_exec($ch);
+  curl_close($ch);
+
+  if ($response) {
+    return drupal_json_decode($response);
+  }
+  else {
+    return array();
+  }
+}
+
+
+/**
+ * Returns the contents of a file as a string given a file URL.
+ *
+ * @param string $file
+ *   The URL of the file.
+ *
+ * @return string
+ *   The contents of the specified file or FALSE on error.
+ */
+function _project_src_gitlab_file_as_string($file, $ref) {
+  $contents = FALSE;
+
+  if ($token = variable_get('project_src_gitlab_token', '')) {
+    $file = url($file, array('query' => array(
+      'ref' => $ref,
+      'private_token' => $token,
+    )));
+
+    $ch = curl_init($file);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, FALSE);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    $contents = curl_exec($ch);
+    curl_close($ch);
+  }
+
+  return $contents;
+}
