@@ -10,14 +10,15 @@
 /**
  * @defgroup project_src_gitlab Project Source: GitLab module integrations.
  *
- * Module integrations with the SkaFlash module.
+ * Module integrations with the Project Source: GitLab module.
  */
 
 /**
  * @defgroup project_src_gitlab_hooks Project Source: GitLab's hooks.
  * @{
  * Hooks that can be implemented by other modules in order to extend the Project
- * Source: GitLab module.
+ * Source: GitLab module. You can place these hooks in the same project_src .inc
+ * file allowed by the Project Source module: my_module.project_src.inc.
  */
 
 /**
