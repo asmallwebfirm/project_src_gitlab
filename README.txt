@@ -13,3 +13,6 @@ https://drupal.org/node/1015226
 
 For more details on integrating your custom Drupal extensions with Drupal's
 update status workflow, see the README.txt of the Project Source module.
+
+To more tightly couple GitLab with your Project Source: GitLab server, note that
+a web hook URL is made available at http://example.com/drupal/gitlab/webhook

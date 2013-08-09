@@ -36,6 +36,16 @@ function project_src_gitlab_menu() {
     'type' => MENU_CALLBACK,
   );
 
+  // Callback to respond to GitLab webhooks.
+  $items['drupal/gitlab/webhook'] = array(
+    'title' => 'GitLab web hook endpoint',
+    'description' => 'Common URL to handle GitLab web hook requests',
+    'page callback' => 'project_src_gitlab_webhook',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+    'file' => 'includes/project_src_gitlab.webhook.inc',
+  );
+
   return $items;
 }
 
